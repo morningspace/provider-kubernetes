@@ -19,12 +19,9 @@ package object
 import (
 	"context"
 
+	"github.com/pkg/errors"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
-
-	"github.com/crossplane-contrib/provider-kubernetes/internal/clients"
-
-	"github.com/pkg/errors"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -44,6 +41,7 @@ import (
 
 	"github.com/crossplane-contrib/provider-kubernetes/apis/object/v1alpha1"
 	apisv1alpha1 "github.com/crossplane-contrib/provider-kubernetes/apis/v1alpha1"
+	"github.com/crossplane-contrib/provider-kubernetes/internal/clients"
 )
 
 const (
