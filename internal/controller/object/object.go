@@ -46,7 +46,21 @@ import (
 	"github.com/crossplane-contrib/provider-kubernetes/internal/clients"
 )
 
+type ManagementType = string
+type FinalizerOp = string
+
 const (
+	Default                ManagementType = "Default"
+	Undeletable            ManagementType = "Undeletable"
+	ObservableAndDeletable ManagementType = "ObservableAndDeletable"
+	Observable             ManagementType = "Observable"
+
+	Add    FinalizerOp = "Add"
+	Remove FinalizerOp = "Remove"
+
+	annoManagementType = "kubernetes.crossplane.io/managementType"
+	finalizerPrefix    = "finalizer.kubernetes.crossplane.io"
+
 	errTrackPCUsage = "cannot track ProviderConfig usage"
 	errGetPC        = "cannot get ProviderConfig"
 	errGetCreds     = "cannot get credentials"
@@ -62,6 +76,8 @@ const (
 	errGetLastApplied          = "cannot get last applied"
 	errUnmarshalTemplate       = "cannot unmarshal template"
 	errFailedToMarshalExisting = "cannot marshal existing resource"
+
+	errFailedToResolveResourceRefs = "cannot resolve resource references"
 )
 
 // Setup adds a controller that reconciles Object managed resources.
@@ -156,6 +172,103 @@ type external struct {
 	client resource.ClientApplicator
 }
 
+func (c *external) ResolveReferencies(ctx context.Context, obj *v1alpha1.Object) error {
+	for _, ref := range obj.Spec.References {
+		// Try to get referenced resource
+		res := &unstructured.Unstructured{}
+		res.SetAPIVersion(ref.FromObject.APIVersion)
+		res.SetKind(ref.FromObject.Kind)
+		err := c.client.Get(ctx, client.ObjectKey{
+			Namespace: ref.FromObject.Namespace,
+			Name:      ref.FromObject.Name,
+		}, res)
+
+		if err != nil {
+			return errors.Wrap(err, "failed to get referenced resource")
+		}
+
+		// Retrieve value from FieldPath and apply to ToFieldPath
+		if err := ref.ApplyFromFieldPathPatch(res, obj); err != nil {
+			return errors.Wrap(err, "failed to patch from referenced resource")
+		}
+	}
+
+	return nil
+}
+
+func (c *external) ManageReferenceFinalizer(ctx context.Context, obj *v1alpha1.Object, op FinalizerOp) error {
+	f := finalizerPrefix + "/" + obj.ObjectMeta.Name
+	for _, ref := range obj.Spec.References {
+		var refRes *unstructured.Unstructured
+		if ref.FromObject.Kind == "Object" && ref.FromObject.APIVersion == "kubernetes.crossplane.io/v1alpha1" {
+			// The referenced resource is an Object.
+			// Resolve the referenced resource managed by the Object
+			refObj := &v1alpha1.Object{}
+			err := c.client.Get(ctx, client.ObjectKey{
+				Namespace: ref.FromObject.Namespace,
+				Name:      ref.FromObject.Name,
+			}, refObj)
+
+			if err != nil {
+				c.logger.Debug("Failed to get referenced Object.", err)
+				continue
+			}
+
+			desiredRes, err := getDesired(refObj)
+			if err != nil {
+				c.logger.Debug("Failed to get referenced resource.", err)
+				continue
+			}
+
+			refRes = desiredRes.DeepCopy()
+
+			err = c.client.Get(ctx, types.NamespacedName{
+				Namespace: refRes.GetNamespace(),
+				Name:      refRes.GetName(),
+			}, refRes)
+
+			if err != nil {
+				c.logger.Debug("Failed to get referenced resource.", err)
+				continue
+			}
+		} else {
+			// Resolve the referenced resource
+			refRes = &unstructured.Unstructured{}
+			refRes.SetAPIVersion(ref.FromObject.APIVersion)
+			refRes.SetKind(ref.FromObject.Kind)
+			err := c.client.Get(ctx, client.ObjectKey{
+				Namespace: ref.FromObject.Namespace,
+				Name:      ref.FromObject.Name,
+			}, refRes)
+
+			if err != nil {
+				c.logger.Debug("Failed to get referenced resource.", err)
+				continue
+			}
+		}
+
+		if op == "Add" {
+			if !meta.FinalizerExists(refRes, f) {
+				meta.AddFinalizer(refRes, f)
+				if err := c.client.Apply(ctx, refRes); err != nil {
+					c.logger.Debug("Failed to add finalizer to referenced resource.", err)
+					continue
+				}
+			}
+		} else {
+			if meta.FinalizerExists(refRes, f) {
+				meta.RemoveFinalizer(refRes, f)
+				if err := c.client.Apply(ctx, refRes); err != nil {
+					c.logger.Debug("Failed to remove finalizer from referenced resource.", err)
+					continue
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
 func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.ExternalObservation, error) {
 	cr, ok := mg.(*v1alpha1.Object)
 	if !ok {
@@ -163,6 +276,25 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	}
 
 	c.logger.Debug("Observing", "resource", cr)
+
+	// See if the managed resource is being deleted while the corresponding external resource is undeletable.
+	// In such a case, we should detach from the external resource to allow the managed resource gets deleted.
+	// As a result, the external resource will get back to be unmanaged.
+	mt, ok := cr.GetAnnotations()[annoManagementType]
+	if meta.WasDeleted(cr) {
+		if ok && (mt == Undeletable || mt == Observable) {
+			c.logger.Debug("Managed resource being deleted but external resource undeletable, detaching from it.")
+			return managed.ExternalObservation{ResourceExists: false}, nil
+		}
+	}
+
+	// Resolve reference if there is any
+	// When failed, e.g. due to reference not ready yet, throw error and requeue to resolve it later
+	if err := c.ResolveReferencies(ctx, cr); err != nil {
+		return managed.ExternalObservation{}, errors.Wrap(err, errFailedToResolveResourceRefs)
+	}
+
+	c.ManageReferenceFinalizer(ctx, cr, Add)
 
 	desired, err := getDesired(cr)
 	if err != nil {
@@ -177,6 +309,9 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	}, observed)
 
 	if kerrors.IsNotFound(err) {
+		if meta.WasDeleted(cr) {
+			c.ManageReferenceFinalizer(ctx, cr, Remove)
+		}
 		return managed.ExternalObservation{ResourceExists: false}, nil
 	}
 	if err != nil {
@@ -192,14 +327,26 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		return managed.ExternalObservation{}, errors.Wrap(err, errGetLastApplied)
 	}
 	if last == nil {
-		return managed.ExternalObservation{
-			ResourceExists:   true,
-			ResourceUpToDate: false,
-		}, nil
+		if mt == "observable_and_deletable" || mt == "observable" {
+			c.logger.Debug("Managed resource observable, skip updating last-applied-configuration.")
+			// Set condition as available
+			cr.Status.SetConditions(xpv1.Available())
+			return managed.ExternalObservation{
+				ResourceExists:   true,
+				ResourceUpToDate: true,
+			}, nil
+		} else {
+			return managed.ExternalObservation{
+				ResourceExists:   true,
+				ResourceUpToDate: false,
+			}, nil
+		}
 	}
 
 	if equality.Semantic.DeepEqual(last, desired) {
 		c.logger.Debug("Up to date!")
+		// Set condition as available
+		cr.Status.SetConditions(xpv1.Available())
 		return managed.ExternalObservation{
 			ResourceExists:   true,
 			ResourceUpToDate: true,
@@ -219,6 +366,15 @@ func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 	}
 
 	c.logger.Debug("Creating", "resource", cr)
+
+	// See if the external resource is defined as observable. If that is the case,
+	// we do not create the external resource.
+	if mt, ok := cr.GetAnnotations()[annoManagementType]; ok &&
+		(mt == ObservableAndDeletable || mt == Observable) {
+		c.logger.Debug("Managed resource observable, skip creating.")
+		return managed.ExternalCreation{}, nil
+	}
+
 	obj, err := getDesired(cr)
 	if err != nil {
 		return managed.ExternalCreation{}, err
@@ -244,6 +400,14 @@ func (c *external) Update(ctx context.Context, mg resource.Managed) (managed.Ext
 
 	c.logger.Debug("Updating", "resource", cr)
 
+	// See if the external resource is defined as observable. If that is the case,
+	// we do not update the external resource.
+	if mt, ok := cr.GetAnnotations()[annoManagementType]; ok &&
+		(mt == ObservableAndDeletable || mt == Observable) {
+		c.logger.Debug("Managed resource observable, skip updating.")
+		return managed.ExternalUpdate{}, nil
+	}
+
 	obj, err := getDesired(cr)
 	if err != nil {
 		return managed.ExternalUpdate{}, err
@@ -268,6 +432,15 @@ func (c *external) Delete(ctx context.Context, mg resource.Managed) error {
 	}
 
 	c.logger.Debug("Deleting", "resource", cr)
+
+	// See if the external resource is defined as observable or undeletable. If that is the case,
+	// we do not delete the external resource and assume this will be handled by external system.
+	if mt, ok := cr.GetAnnotations()[annoManagementType]; ok &&
+		(mt == Undeletable || mt == Observable) {
+		c.logger.Debug("Managed resource undeletable, skip deleting.")
+		return nil
+	}
+
 	obj, err := getDesired(cr)
 	if err != nil {
 		return err
