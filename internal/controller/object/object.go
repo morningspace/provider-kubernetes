@@ -210,13 +210,13 @@ func (c *external) ManageReferenceFinalizer(ctx context.Context, obj *v1alpha1.O
 			}, refObj)
 
 			if err != nil {
-				c.logger.Debug("Failed to get referenced Object.", err)
+				c.logger.Debug("Failed to get referenced Object.")
 				continue
 			}
 
 			desiredRes, err := getDesired(refObj)
 			if err != nil {
-				c.logger.Debug("Failed to get referenced resource.", err)
+				c.logger.Debug("Failed to get referenced resource.")
 				continue
 			}
 
@@ -228,7 +228,7 @@ func (c *external) ManageReferenceFinalizer(ctx context.Context, obj *v1alpha1.O
 			}, refRes)
 
 			if err != nil {
-				c.logger.Debug("Failed to get referenced resource.", err)
+				c.logger.Debug("Failed to get referenced resource.")
 				continue
 			}
 		} else {
@@ -242,7 +242,7 @@ func (c *external) ManageReferenceFinalizer(ctx context.Context, obj *v1alpha1.O
 			}, refRes)
 
 			if err != nil {
-				c.logger.Debug("Failed to get referenced resource.", err)
+				c.logger.Debug("Failed to get referenced resource.")
 				continue
 			}
 		}
@@ -251,7 +251,7 @@ func (c *external) ManageReferenceFinalizer(ctx context.Context, obj *v1alpha1.O
 			if !meta.FinalizerExists(refRes, f) {
 				meta.AddFinalizer(refRes, f)
 				if err := c.client.Apply(ctx, refRes); err != nil {
-					c.logger.Debug("Failed to add finalizer to referenced resource.", err)
+					c.logger.Debug("Failed to add finalizer to referenced resource.")
 					continue
 				}
 			}
@@ -259,7 +259,7 @@ func (c *external) ManageReferenceFinalizer(ctx context.Context, obj *v1alpha1.O
 			if meta.FinalizerExists(refRes, f) {
 				meta.RemoveFinalizer(refRes, f)
 				if err := c.client.Apply(ctx, refRes); err != nil {
-					c.logger.Debug("Failed to remove finalizer from referenced resource.", err)
+					c.logger.Debug("Failed to remove finalizer from referenced resource.")
 					continue
 				}
 			}
@@ -327,7 +327,7 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		return managed.ExternalObservation{}, errors.Wrap(err, errGetLastApplied)
 	}
 	if last == nil {
-		if mt == "observable_and_deletable" || mt == "observable" {
+		if mt == ObservableAndDeletable || mt == Observable {
 			c.logger.Debug("Managed resource observable, skip updating last-applied-configuration.")
 			// Set condition as available
 			cr.Status.SetConditions(xpv1.Available())
