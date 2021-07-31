@@ -46,14 +46,24 @@ import (
 	"github.com/crossplane-contrib/provider-kubernetes/internal/clients"
 )
 
+// A ManagementType determines what should happen when manage an external resource
 type ManagementType = string
+
+// A FinalizerOp determines whether add or remove finalizer
 type FinalizerOp = string
 
 const (
-	Default                ManagementType = "Default"
-	Undeletable            ManagementType = "Undeletable"
+	// Default means the external resource will be fully managed by ExternalClient
+	Default ManagementType = "Default"
+
+	// Undeletable means the external resource will be left orphan when the managed resource is deleted by ExternalClient
+	Undeletable ManagementType = "Undeletable"
+
+	// ObservableAndDeletable means the external resource will only be observed and deleted by ExternalClient
 	ObservableAndDeletable ManagementType = "ObservableAndDeletable"
-	Observable             ManagementType = "Observable"
+
+	// Observable means the external resource will only be observed by ExternalClient
+	Observable ManagementType = "Observable"
 
 	Add    FinalizerOp = "Add"
 	Remove FinalizerOp = "Remove"
@@ -196,7 +206,7 @@ func (c *external) ResolveReferencies(ctx context.Context, obj *v1alpha1.Object)
 	return nil
 }
 
-func (c *external) ManageReferenceFinalizer(ctx context.Context, obj *v1alpha1.Object, op FinalizerOp) error {
+func (c *external) ManageReferenceFinalizer(ctx context.Context, obj *v1alpha1.Object, op FinalizerOp) {
 	f := finalizerPrefix + "/" + obj.ObjectMeta.Name
 	for _, ref := range obj.Spec.References {
 		var refRes *unstructured.Unstructured
@@ -265,8 +275,6 @@ func (c *external) ManageReferenceFinalizer(ctx context.Context, obj *v1alpha1.O
 			}
 		}
 	}
-
-	return nil
 }
 
 func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.ExternalObservation, error) {
